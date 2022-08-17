@@ -1,0 +1,16 @@
+[package]
+name = "fstdumper-rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fstdumper"
+crate-type = ["cdylib"]
+
+[dependencies]
+vpi-sys = { path = "vpi-sys" }
+fst-sys = { path = "fst-sys" }
+anyhow = { version =  "1.0.61", features = ["backtrace"] }
+thiserror = "1.0.32"
+num_enum = "0.5.7"
+bumpalo = "3.10.0"
