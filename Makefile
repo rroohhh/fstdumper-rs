@@ -15,8 +15,8 @@ fstdumper.so.vpi : fstdumper.so
 simulation-iverilog: target/debug/libfstdumper.so Vtop.vvp
 	vvp -M . -mtarget/debug/libfstdumper.so Vtop.vvp
 
-simulation-xrun: fstdumper.so
-	xrun -64bit +access+r -loadvpi ./fstdumper.so:vlog_startup_routines_bootstrap $(TESTBENCH) -top div_int_tb
+simulation-xrun: target/debug/libfstdumper.so 
+	xrun -64bit +access+r -loadvpi ./target/debug/libfstdumper.so:vlog_startup_routines_bootstrap $(TESTBENCH) -top div_int_tb
 
 simulation-vsim: fstdumper.so
 	vlog -64 $(TESTBENCH)

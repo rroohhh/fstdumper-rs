@@ -25,6 +25,15 @@ static A: System = System;
 #[no_mangle]
 pub static vlog_startup_routines: [Option<extern "C" fn()>; 2] = [Some(fst_register), None];
 
+#[no_mangle]
+unsafe extern "C" fn vlog_startup_routines_bootstrap() {
+    let mut cnt = 0;
+    while let Some(func) = vlog_startup_routines[cnt] {
+        func();
+        cnt += 1;
+    }
+}
+
 macro_rules! log {
     ($($args:expr),*) => {
         let message = format!($($args),*);
@@ -45,6 +54,11 @@ struct TraceItem<'a> {
     handle: vpiHandle,
     fst_handle: fstHandle,
     ty: PLI_INT32,
+    encoding: Option<std::collections::HashMap<std::ffi::CString, std::ffi::CString>>,
+    // TODO(robin): track change values and only emit on change of time if value changed
+    // last_time: Time,
+    // last_value: std::ffi::CString,
+    // last_tmp: Option<std::ffi::CString>,
 }
 
 impl<'a> TraceItem<'a> {
@@ -53,10 +67,16 @@ impl<'a> TraceItem<'a> {
             Time::Sim(sim_time) => sim_time,
             _ => unreachable!(),
         };
+
         self.context.set_time(Some(sim_time));
 
         let value = match value {
-            Value::BinStr(v) => v,
+            Value::BinStr(v) => self
+                .encoding
+                .as_ref()
+                .and_then(|e| e.get(v))
+                .map(|v| <std::ffi::CString as std::ops::Deref>::deref(v))
+                .unwrap_or(v),
             _ => unreachable!(),
         };
         self.context
@@ -157,7 +177,7 @@ unsafe extern "C" fn error_handler(_: *mut t_cb_data) -> PLI_INT32 {
             CStr::from_ptr(error_info.file),
             error_info.line
         );
-        vpi_control(vpiFinish, 1);
+        //        vpi_control(vpiFinish, 1);
     }
 
     0
@@ -242,7 +262,7 @@ impl Context {
             #[allow(non_upper_case_globals)] // https://github.com/rust-lang/rust/issues/39371
             match self.vpi.get(vpiType, Some(depth_arg)) {
                 vpiConstant | vpiParameter => match self.vpi.get(vpiConstType, Some(depth_arg)) {
-                    vpiBinaryConst | vpiIntConst => {
+                    vpiBinaryConst | vpiDecConst | vpiIntConst => {
                         // rest of args are things to dump
                         for arg in args_iter {
                             #[allow(non_upper_case_globals)]
@@ -252,7 +272,8 @@ impl Context {
                                 vpiMemoryWord | vpiModule | vpiGenScope | vpiFunction | vpiTask
                                 | vpiNamedBegin | vpiNamedFork | vpiNet | vpiReg
                                 | vpiIntegerVar | vpiBitVar | vpiByteVar | vpiLongIntVar
-                                | vpiRealVar | vpiNamedEvent | vpiParameter => {}
+                                | vpiRealVar | vpiNamedEvent | vpiParameter | vpiEnumVar
+                                | vpiStructVar | vpiInterface => {}
                                 _ => {
                                     return Err(anyhow::anyhow!(
                                         "{FST_DUMPVARS} cannot dump {:?}",
@@ -269,7 +290,7 @@ impl Context {
                     )),
                 },
                 _ => Err(anyhow::anyhow!(
-                    "{FST_DUMPFILE} expects a constant int argument, got {:?}",
+                    "{FST_DUMPFILE} expects a constant argument, got {:?}",
                     self.vpi.string.get(vpiType, depth_arg),
                 )),
             }
@@ -285,7 +306,7 @@ impl Context {
                 .iter(vpiArgument, Some(self.vpi.handle(vpiSysTfCall, None)?))?
                 .next()
                 .unwrap();
-            if let Value::String(filename) = self.vpi.value.get(ValueTy::String, filename) {
+            if let Value::String(filename) = self.vpi.value.get(ValueTy::String, filename)? {
                 let filename = filename.to_str()?.to_owned();
                 let filename = if filename.ends_with(".fst") {
                     filename
@@ -318,7 +339,7 @@ impl Context {
 
             // parse (optional) depth
             let depth = if let Some(depth_arg) = args_iter.next() {
-                match self.vpi.value.get(ValueTy::Int, depth_arg) {
+                match self.vpi.value.get(ValueTy::Int, depth_arg)? {
                     Value::Int(depth) => {
                         if depth == 0 {
                             i32::MAX
@@ -410,7 +431,9 @@ impl Context {
     }
 
     fn subtypes_for(ty: PLI_INT32) -> &'static [PLI_INT32] {
+        // the ordering here matters
         static FOR_MODULE: &'static [PLI_INT32] = &[
+            vpiInternalScope,
             vpiInterface,
             vpiModule,
             vpiInstance,
@@ -418,18 +441,41 @@ impl Context {
             vpiReg,
             vpiNet,
             vpiParameter,
-            vpiMember,
         ];
+
+        static FOR_SCOPE: &'static [PLI_INT32] = &[
+            vpiInternalScope,
+            vpiInterface,
+            vpiModule,
+            vpiVariables,
+            vpiReg,
+            vpiNet,
+            vpiParameter,
+        ];
+
+        static FOR_BEGIN: &'static [PLI_INT32] =
+            &[vpiInternalScope, vpiVariables, vpiReg, vpiParameter];
 
         #[allow(non_upper_case_globals)]
         match ty {
             vpiModule => FOR_MODULE,
+            vpiNamedBegin => FOR_BEGIN,
+            vpiGenScope => FOR_SCOPE,
+            // TODO(robin): do we want to iterate over modports?
+            vpiInterface => {
+                static types: &'static [PLI_INT32] = &[vpiNet, vpiVariables, vpiInterface];
+                types
+            }
             vpiNetArray => {
                 static types: &'static [PLI_INT32] = &[vpiNet];
                 types
             }
             vpiRegArray => {
                 static types: &'static [PLI_INT32] = &[vpiReg];
+                types
+            }
+            vpiPackedArrayVar | vpiPackedArrayNet => {
+                static types: &'static [PLI_INT32] = &[vpiElement];
                 types
             }
             vpiStructVar | vpiUnionVar | vpiStructNet => {
@@ -451,6 +497,19 @@ impl Context {
     ) -> anyhow::Result<()> {
         if max_depth == current_depth {
             Ok(())
+        }
+        /*
+        else if self.vpi.get(511, Some(thing)) == 2 {
+            log!("unhandled vhdl thing {:?}", thing);
+            Ok(())
+        } */
+        else if (match self.vpi.get(vpiType, Some(thing)) {
+            vpiModule => true,
+            _ => false,
+        }) && self.vpi.get(vpiProtected, Some(thing)) == 1
+        {
+            log!("not dumping a protected thing: {:?}", thing);
+            Ok(())
         } else {
             // there are two main things we need to differentiate here
             // 1. leaf things for which we actually want to capture the values
@@ -458,14 +517,19 @@ impl Context {
             #[allow(non_upper_case_globals)]
             match self.vpi.get(vpiType, Some(thing)) {
                 // a leaf value
-                ty @ (vpiNet | vpiLogicNet | vpiParameter | vpiLogicVar) => {
-                    self.add_trace(ty, thing)?;
+                ty @ (vpiNet | vpiLogicNet | vpiParameter | vpiLogicVar | vpiRealVar
+                | vpiIntegerVar | vpiTimeVar | vpiEnumVar | vpiEnumNet) => {
+                    if let Err(e) = self.add_trace(ty, thing) {
+                        log!("error adding var {e:?}");
+                    }
 
                     Ok(())
                 }
                 // something we can recurse on
-                ty @ (vpiModule | vpiStructVar | vpiUnionVar | vpiStructNet) => self
-                    .with_fst_scope(ty, thing, |this| {
+                ty @ (vpiModule | vpiStructVar | vpiUnionVar | vpiStructNet | vpiInterface
+                | vpiRegArray | vpiNamedBegin | vpiGenScope | vpiPackedArrayVar
+                | vpiPackedArrayNet) => {
+                    self.with_fst_scope(ty, thing, |this| {
                         let next_depth = if ty == vpiModule {
                             current_depth + 1
                         } else {
@@ -474,11 +538,11 @@ impl Context {
 
                         let mut sub_things = Vec::new();
                         for sub_type in Self::subtypes_for(ty) {
-                            log!(
-                                "iterating type {} of {:?}",
-                                vpi_const_to_str(*sub_type),
-                                this.vpi.string.get(vpiFullName, thing)?
-                            );
+                            // log!(
+                            //     "iterating type {} of {:?}",
+                            //     vpi_const_to_str(*sub_type),
+                            //     this.vpi.string.get(vpiFullName, thing)?
+                            // );
 
                             for sub_thing in this.vpi.maybe_empty_iter(*sub_type, Some(thing)) {
                                 if sub_things
@@ -491,20 +555,24 @@ impl Context {
                                     sub_things.push(sub_thing);
                                     this.add_dumpvar(sub_thing, max_depth, next_depth)?;
                                 } else {
-                                    log!(
-                                        "already iterated over {:?}",
-                                        this.vpi.string.get(vpiFullName, thing)?
-                                    );
+                                    // TODO(robin): cannot print vpiAssignment
+                                    // log!(
+                                    //     "already iterated over {:?}",
+                                    //     this.vpi.string.get(vpiFullName, sub_thing)?
+                                    // );
                                 }
                             }
                         }
 
                         Ok(())
-                    }),
-                _ => Err(anyhow::anyhow!(
-                    "don't know how to dump {:?} of type {:?}",
-                    self.vpi.string.get(vpiName, thing)?.to_owned(),
-                    self.vpi.string.get(vpiType, thing)?
+                    })
+                }
+                // TODO(robin): add consts for 3rd party simulator stuff
+                vpiPackage | vpiFunction | vpiTask | vpiIntVar | 1024 | vpiTypeParameter => Ok(()),
+                ty => Err(anyhow::anyhow!(
+                    "don't know how to dump {:?} of type {ty} = {:?}",
+                    self.vpi.string.get(vpiName, thing).map(|v| v.to_owned()),
+                    self.vpi.string.get(vpiType, thing)
                 )),
             }
         }
@@ -521,14 +589,33 @@ impl Context {
         // https://github.com/rust-lang/rust/issues/39371
         let scope_type = match ty {
             vpiModule => Ok(fstScopeType::FST_ST_VCD_MODULE),
+            vpiInterface => Ok(fstScopeType::FST_ST_VCD_INTERFACE),
+            vpiStructVar | vpiStructNet => Ok(fstScopeType::FST_ST_VCD_STRUCT),
+            // TODO(robin): better fit for array scope type?
+            vpiRegArray => Ok(fstScopeType::FST_ST_VCD_MODULE),
+            vpiPackedArray => Ok(fstScopeType::FST_ST_VCD_MODULE),
+            vpiNamedBegin => Ok(fstScopeType::FST_ST_VCD_BEGIN),
+            vpiGenScope => Ok(fstScopeType::FST_ST_VCD_GENERATE),
             _ => Err(anyhow::anyhow!(
                 "cannot map vpi type {} to fst scope type",
                 vpi_const_to_str(ty)
             )),
         }?;
         let name = self.vpi.string.get(vpiName, handle)?.to_owned();
-        let comp_name = self.vpi.string.get(vpiDefName, handle)?;
-        fst_file.set_scope(scope_type, name, Some(comp_name));
+
+        let unk = std::ffi::CString::new("unk")?;
+        let comp_name = match ty {
+            vpiModule | vpiInterface => Some(self.vpi.string.get(vpiDefName, handle)?),
+            vpiRegArray | vpiNamedBegin | vpiGenScope => None,
+            _ => Some(
+                self.vpi
+                    .string
+                    .get(vpiName, self.vpi.handle(vpiTypespec, Some(handle))?)
+                    .unwrap_or(&*unk),
+            ),
+        };
+
+        fst_file.set_scope(scope_type, name, comp_name);
         let ret = func(self);
 
         let fst_file = self.fst_file.as_mut().unwrap();
@@ -538,16 +625,17 @@ impl Context {
     }
 
     fn add_trace(&mut self, ty: PLI_INT32, handle: vpiHandle) -> anyhow::Result<()> {
+        // log!("dumping {:?}", self.vpi.string.get(vpiFullName, handle)?);
         let full_name = self.vpi.string.get(vpiFullName, handle)?;
         if self.already_traced_items.contains(full_name) {
             Ok(())
         } else {
             self.already_traced_items.insert(full_name.to_owned());
-            log!(
-                "WILL TRACE {:?} of type {}",
-                self.vpi.string.get(vpiFullName, handle),
-                vpi_const_to_str(ty)
-            );
+            // log!(
+            //     "WILL TRACE {:?} of type {}",
+            //     self.vpi.string.get(vpiFullName, handle),
+            //     vpi_const_to_str(ty)
+            // );
 
             #[allow(non_upper_case_globals)]
             // https://github.com/rust-lang/rust/issues/39371
@@ -556,8 +644,16 @@ impl Context {
                 vpiLogicVar => Ok(fstVarType::FST_VT_SV_LOGIC),
                 vpiNet => match self.vpi.get(vpiNetType, Some(handle)) {
                     vpiWire => Ok(fstVarType::FST_VT_VCD_WIRE),
+                    vpiUwire => Ok(fstVarType::FST_VT_VCD_WIRE),
+                    vpiTri0 => Ok(fstVarType::FST_VT_VCD_TRI0),
+                    vpiTri1 => Ok(fstVarType::FST_VT_VCD_TRI1),
+                    vpiTri => Ok(fstVarType::FST_VT_VCD_TRI),
                     unk => Err(anyhow::anyhow!("unhandled net type {unk}")),
                 },
+                vpiRealVar => Ok(fstVarType::FST_VT_VCD_REAL),
+                vpiIntegerVar => Ok(fstVarType::FST_VT_VCD_INTEGER),
+                vpiTimeVar => Ok(fstVarType::FST_VT_VCD_TIME),
+                vpiEnumVar | vpiEnumNet => Ok(fstVarType::FST_VT_SV_ENUM),
                 unk => Err(anyhow::anyhow!(
                     "unhandled variable type {}",
                     vpi_const_to_str(unk)
@@ -565,21 +661,90 @@ impl Context {
             }?;
 
             let fst_file = self.fst_file.as_mut().unwrap();
+
+            // TODO(robin): store these somewhere and then reuse?
+            let (encoding, bits): (Option<std::collections::HashMap<_, _>>, _) =
+                if ty == vpiEnumVar || ty == vpiEnumNet {
+                    let typespec = self.vpi.handle(vpiTypespec, Some(handle))?;
+                    let mut names = Vec::new();
+                    let mut values = Vec::new();
+
+                    let anon = std::ffi::CString::new("anonymous")?;
+                    let name = self
+                        .vpi
+                        .string
+                        .get(vpiName, typespec)
+                        .unwrap_or(&*anon)
+                        .to_owned();
+                    for enum_const in self.vpi.iter(vpiEnumConst, Some(typespec))? {
+                        names.push(self.vpi.string.get(vpiName, enum_const)?.to_owned());
+                        values.push(match self.vpi.value.get(ValueTy::BinStr, enum_const) {
+                            Ok(Value::BinStr(s)) => s.to_owned(),
+                            _ => unreachable!(),
+                        });
+                    }
+
+                    let mut one_hot_values = Vec::new();
+                    let bits = values.len();
+                    for i in 0..bits {
+                        one_hot_values.push(std::ffi::CString::new(format!(
+                            "{:0width$b}",
+                            1 << i,
+                            width = bits
+                        ))?);
+                    }
+                    let enum_handle = fst_file.create_enum_table(
+                        name,
+                        names.into_iter().zip(one_hot_values.clone().into_iter()),
+                    );
+                    fst_file.emit_enum_table_ref(enum_handle);
+
+                    // TODO(robin): add appropriate sized x and z entries in the encoding
+
+                    (
+                        Some(values.into_iter().zip(one_hot_values.into_iter()).collect()),
+                        bits as _,
+                    )
+                } else {
+                    (None, self.vpi.get(vpiSize, Some(handle)).try_into()?)
+                };
+
             let fst_handle = fst_file.create_var(
                 var_type,
                 fstVarDir::FST_VD_IMPLICIT,
-                self.vpi.get(vpiSize, Some(handle)).try_into()?,
+                bits,
                 self.vpi.string.get(vpiName, handle)?,
                 None,
             );
 
-            {
+            let value = match self.vpi.value.get(ValueTy::BinStr, handle) {
+                Ok(Value::BinStr(v)) => encoding
+                    .as_ref()
+                    .and_then(|e| e.get(v))
+                    .map(|v| <std::ffi::CString as std::ops::Deref>::deref(v))
+                    .unwrap_or(v),
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "got no value for {:?}",
+                        self.vpi.string.get(vpiFullName, handle)?
+                    ))
+                }
+                _ => unreachable!(),
+            };
+            self.fst_file
+                .as_mut()
+                .unwrap()
+                .emit_value_change(fst_handle, value);
+
+            // no need / illegal to register callbacks on constant objects
+            if ty != vpiParameter {
                 let cheated_context_ref = unsafe { &mut *(self as *mut Context) };
                 let trace_item = self.trace_items.alloc(TraceItem {
                     context: cheated_context_ref,
                     handle,
                     fst_handle,
                     ty,
+                    encoding,
                 });
 
                 let mut time_config = t_vpi_time {
@@ -605,15 +770,6 @@ impl Context {
                 unsafe { vpi_register_cb(&mut value_change_cb as _) };
             }
 
-            let value = match self.vpi.value.get(ValueTy::BinStr, handle) {
-                Value::BinStr(v) => v,
-                _ => unreachable!(),
-            };
-            self.fst_file
-                .as_mut()
-                .unwrap()
-                .emit_value_change(fst_handle, value);
-
             Ok(())
         }
     }
@@ -621,7 +777,12 @@ impl Context {
 
 unsafe extern "C" fn value_changed_handler(data: *mut t_cb_data) -> PLI_INT32 {
     let trace_item = &mut *((*data).user_data as *mut TraceItem);
-    catch_error(|| trace_item.trip(Time::from(*(*data).time), Value::from(*(*data).value)))
+    catch_error(|| {
+        trace_item.trip(
+            Time::from(*(*data).time),
+            Value::try_from(*(*data).value).unwrap(),
+        )
+    })
 }
 
 unsafe fn alloc_inited<T>(init_value: T) -> *mut T {
@@ -634,3 +795,6 @@ unsafe fn alloc_inited<T>(init_value: T) -> *mut T {
 
 // TODO(robin):
 // enums
+// vhdl interop
+// time vars
+// real vars

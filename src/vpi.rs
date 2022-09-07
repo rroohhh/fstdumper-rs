@@ -33,7 +33,8 @@ impl VPIString {
 pub struct VPIValue(());
 
 impl VPIValue {
-    pub fn get<'a>(&'a mut self, ty: ValueTy, object: vpiHandle) -> Value<'a> {
+    // TODO(robin): add a get_ty<T> helper that takes ValueTy and returns only that value
+    pub fn get<'a>(&'a mut self, ty: ValueTy, object: vpiHandle) -> Result<Value<'a>> {
         let mut value = t_vpi_value {
             format: ty as _,
             ..Default::default()
@@ -41,8 +42,7 @@ impl VPIValue {
         unsafe {
             vpi_get_value(object, &mut value as *mut _);
         }
-
-        value.into()
+        value.try_into()
     }
 }
 
@@ -78,21 +78,30 @@ pub enum Value<'a> {
     Time(&'a t_vpi_time),
 }
 
-impl<'a> From<t_vpi_value> for Value<'a> {
-    fn from(value: t_vpi_value) -> Self {
+impl<'a> TryFrom<t_vpi_value> for Value<'a> {
+    type Error = VPIError;
+
+    fn try_from(value: t_vpi_value) -> Result<Self> {
+        fn check_ptr<'a>(ptr: *mut vpi_sys::PLI_BYTE8) -> Result<&'a CStr> {
+            if ptr.is_null() {
+                Err(VPIError::NullValue)
+            } else {
+                Ok(unsafe { CStr::from_ptr(ptr) })
+            }
+        }
         unsafe {
             match ValueTy::try_from(value.format).unwrap() {
-                ValueTy::BinStr => Value::BinStr(CStr::from_ptr(value.value.str_)),
-                ValueTy::OctStr => Value::OctStr(CStr::from_ptr(value.value.str_)),
-                ValueTy::DecStr => Value::DecStr(CStr::from_ptr(value.value.str_)),
-                ValueTy::HexStr => Value::HexStr(CStr::from_ptr(value.value.str_)),
-                ValueTy::Scalar => Value::Scalar(value.value.scalar),
-                ValueTy::Int => Value::Int(value.value.integer),
-                ValueTy::Real => Value::Real(value.value.real),
-                ValueTy::String => Value::String(CStr::from_ptr(value.value.str_)),
-                ValueTy::Time => Value::Time(&*value.value.time),
-                ValueTy::Vector => Value::Vector(&*value.value.vector),
-                ValueTy::Strength => Value::Strength(&*value.value.strength),
+                ValueTy::BinStr => check_ptr(value.value.str_).map(Value::BinStr),
+                ValueTy::OctStr => check_ptr(value.value.str_).map(Value::OctStr),
+                ValueTy::DecStr => check_ptr(value.value.str_).map(Value::DecStr),
+                ValueTy::HexStr => check_ptr(value.value.str_).map(Value::HexStr),
+                ValueTy::Scalar => Ok(Value::Scalar(value.value.scalar)),
+                ValueTy::Int => Ok(Value::Int(value.value.integer)),
+                ValueTy::Real => Ok(Value::Real(value.value.real)),
+                ValueTy::String => check_ptr(value.value.str_).map(Value::String),
+                ValueTy::Time => Ok(Value::Time(&*value.value.time)),
+                ValueTy::Vector => Ok(Value::Vector(&*value.value.vector)),
+                ValueTy::Strength => Ok(Value::Strength(&*value.value.strength)),
                 ValueTy::ObjType => unreachable!(),
             }
         }
@@ -245,6 +254,8 @@ pub enum VPIError {
     NullHandleIterate(VPITy, Option<vpiHandle>),
     #[error("null string obtained for type {} on ref {1:?}", vpi_const_to_str(*.0))]
     NullString(VPITy, vpiHandle),
+    #[error("null value obtained")]
+    NullValue,
 }
 
 unsafe impl Send for VPIError {}

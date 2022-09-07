@@ -73,6 +73,38 @@ impl FstFile {
             )
         }
     }
+
+    pub fn create_enum_table(
+        &mut self,
+        name: impl std::ops::Deref<Target = std::ffi::CStr>,
+        name_value_pairs: impl Iterator<Item = (CString, CString)>,
+    ) -> fst_sys::fstEnumHandle {
+        let mut names_holder = Vec::new();
+        let mut values_holder = Vec::new();
+        let mut names = Vec::new();
+        let mut values = Vec::new();
+        for (name, value) in name_value_pairs {
+            names_holder.push(name);
+            values_holder.push(value);
+            names.push(names_holder.last().unwrap().as_ptr());
+            values.push(values_holder.last().unwrap().as_ptr());
+        }
+
+        unsafe {
+            fst_sys::fstWriterCreateEnumTable(
+                self.file,
+                name.as_ptr(),
+                names.len() as u32,
+                0, /* min val bits */
+                names.as_mut_ptr(),
+                values.as_mut_ptr(),
+            )
+        }
+    }
+
+    pub fn emit_enum_table_ref(&mut self, enum_handle: fst_sys::fstEnumHandle) {
+        unsafe { fst_sys::fstWriterEmitEnumTableRef(self.file, enum_handle) }
+    }
 }
 
 impl Drop for FstFile {
