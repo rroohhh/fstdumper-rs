@@ -29,6 +29,7 @@ fn main() -> Result<(), std::env::VarError> {
     build
         .warnings(false)
         .define("FST_CONFIG_INCLUDE", "\"fstapi.h\"")
+        .define("FST_REMOVE_DUPLICATE_VC", "1")
         // .define("FST_DEBUG", "1")
         .file("fst/fstapi.c")
         .file("fst/fastlz.c")

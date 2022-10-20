@@ -17,7 +17,7 @@ type VPITy = i32;
 pub struct VPIString(());
 
 impl VPIString {
-    pub fn get<'a>(&'a mut self, ty: VPITy, object: vpiHandle) -> Result<&'a CStr> {
+    pub fn get(&mut self, ty: VPITy, object: vpiHandle) -> Result<&CStr> {
         unsafe {
             let ptr = vpi_get_str(ty, object);
             if ptr.is_null() {
@@ -34,7 +34,7 @@ pub struct VPIValue(());
 
 impl VPIValue {
     // TODO(robin): add a get_ty<T> helper that takes ValueTy and returns only that value
-    pub fn get<'a>(&'a mut self, ty: ValueTy, object: vpiHandle) -> Result<Value<'a>> {
+    pub fn get(&mut self, ty: ValueTy, object: vpiHandle) -> Result<Value> {
         let mut value = t_vpi_value {
             format: ty as _,
             ..Default::default()
@@ -147,15 +147,15 @@ impl<T> OptionExt<T> for Option<*mut T> {
 }
 
 trait PtrExt<T> {
-    fn from_ptr(self) -> Option<*mut T>;
+    fn from_ptr(value: *mut T) -> Self;
 }
 
-impl<T> PtrExt<T> for *mut T {
-    fn from_ptr(self) -> Option<*mut T> {
-        if self.is_null() {
+impl<T> PtrExt<T> for Option<*mut T> {
+    fn from_ptr(value: *mut T) -> Option<*mut T> {
+        if value.is_null() {
             None
         } else {
-            Some(self)
+            Some(value)
         }
     }
 }
@@ -170,14 +170,15 @@ impl VPIContext {
     }
 
     pub fn handle(&self, ty: VPITy, reference: Option<vpiHandle>) -> Result<vpiHandle> {
-        let handle: Option<vpiHandle> = unsafe { vpi_handle(ty, reference.into_ptr()).from_ptr() };
-        handle.ok_or_else(|| VPIError::NullHandle(ty, reference))
+        let handle: Option<vpiHandle> =
+            Option::from_ptr(unsafe { vpi_handle(ty, reference.into_ptr()) });
+        handle.ok_or(VPIError::NullHandle(ty, reference))
     }
 
     pub fn iter(&self, ty: VPITy, reference: Option<vpiHandle>) -> Result<VPIIterator> {
-        let iterator_handle = unsafe { vpi_iterate(ty, reference.into_ptr()).from_ptr() };
+        let iterator_handle = Option::from_ptr(unsafe { vpi_iterate(ty, reference.into_ptr()) });
         iterator_handle
-            .ok_or_else(|| VPIError::NullHandleIterate(ty, reference))
+            .ok_or(VPIError::NullHandleIterate(ty, reference))
             .map(|iterator_handle| VPIIterator {
                 iterator_handle,
                 empty: false,
@@ -228,7 +229,7 @@ impl Iterator for VPIIterator {
         if self.empty {
             None
         } else {
-            let item = unsafe { vpi_scan(self.iterator_handle) }.from_ptr();
+            let item = Option::from_ptr(unsafe { vpi_scan(self.iterator_handle) });
             self.done = item.is_none();
             item
         }
@@ -245,6 +246,7 @@ impl Drop for VPIIterator {
     }
 }
 
+#[allow(clippy::enum_variant_names)]
 // TODO(robin): better printing for abstract values?
 #[derive(thiserror::Error, Debug)]
 pub enum VPIError {
@@ -263,3 +265,10 @@ unsafe impl Sync for VPIError {}
 
 mod vpi_to_str;
 pub use vpi_to_str::vpi_const_to_str;
+
+// cadence extensions
+pub const vpiLanguage: i32 = 511;
+pub const vpiVerilog: i32 = 1;
+pub const vpiVHDL: i32 = 2;
+// pub const vpiSystemC: i32 = 3;
+// pub const vpiE: i32 = 4;

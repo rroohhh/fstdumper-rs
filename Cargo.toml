@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 vpi-sys = { path = "vpi-sys" }
+vhpi-sys = { path = "vhpi-sys" }
 fst-sys = { path = "fst-sys" }
 anyhow = { version =  "1.0.61", features = ["backtrace"] }
 thiserror = "1.0.32"

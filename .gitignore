@@ -3,3 +3,16 @@
 *.fst
 *.vvp
 ideas.txt
+.fuse_hidden*
+.bpad
+bpad*.err
+xcelium.d
+fst-sys/fst/CMakeLists.txt
+fst-sys/fst/Makefile.am
+fst-sys/fst/Makefile.in
+fst-sys/fst/block_format.txt
+fst-sys/target/
+vhpi-ysy/target/
+vpi-ysy/target/
+xmelab*.err
+xrun*
