@@ -65,6 +65,7 @@ struct TraceItem<'a> {
     context: &'a mut Context,
     fst_handle: fstHandle,
     encoding: Option<HashMap<CString, CString>>,
+    is_string: bool,
     // TODO(robin): track change values and only emit on change of time if value changed
     // last_time: Time,
     // last_value: CString,
@@ -89,11 +90,19 @@ impl<'a> TraceItem<'a> {
                 .unwrap_or(v),
             _ => unreachable!(),
         };
-        self.context
-            .fst_file
-            .as_mut()
-            .unwrap()
-            .emit_value_change(self.fst_handle, value);
+        if self.is_string {
+            self.context
+                .fst_file
+                .as_mut()
+                .unwrap()
+                .emit_var_length_value_change(self.fst_handle, value);
+        } else {
+            self.context
+                .fst_file
+                .as_mut()
+                .unwrap()
+                .emit_value_change(self.fst_handle, value);
+        }
 
         Ok(0)
     }
@@ -709,18 +718,10 @@ impl Context {
         // );
 
         // TODO(robin): remove this is string and try with strings?
-        if (max_depth == current_depth) || is_string {
+        if max_depth == current_depth {
             Ok(())
-        }
-        /*
-        else if self.vpi.get(511, Some(thing)) == 2 {
-            log!("unhandled vhdl thing {:?}", thing);
-            Ok(())
-        } */
-        else if (match self.vpi.get(vpiType, Some(thing)) {
-            vpiModule => true,
-            _ => false,
-        }) && self.vpi.get(vpiProtected, Some(thing)) == 1
+        } else if (self.vpi.get(vpiType, Some(thing)) == vpiModule)
+            && (self.vpi.get(vpiProtected, Some(thing)) == 1)
         {
             log!("not dumping a protected thing: {:?}", thing);
             Ok(())
@@ -731,8 +732,13 @@ impl Context {
                 vhpiClassKindT::vhpiConstDeclK | vhpiClassKindT::vhpiGenericDeclK
             ) || is_const;
 
-            match (self.vhpi.get_kind(thing)?, is_composite, basic_array) {
-                (ty, _, true) | (ty, Some(false), _) => {
+            match (
+                self.vhpi.get_kind(thing)?,
+                is_composite,
+                basic_array,
+                is_string,
+            ) {
+                (ty, _, true, _) | (ty, Some(false), _, _) | (ty, _, _, true) => {
                     if let Err(e) = self.add_trace_vhdl(
                         ty,
                         thing,
@@ -742,6 +748,7 @@ impl Context {
                         is_const,
                         is_basic,
                         basic_array,
+                        is_string,
                     ) {
                         log!("error adding var: {e}");
                     }
@@ -757,6 +764,7 @@ impl Context {
                     | vhpiClassKindT::vhpiIfGenerateK
                     | vhpiClassKindT::vhpiConstDeclK
                     | vhpiClassKindT::vhpiGenericDeclK),
+                    _,
                     _,
                     _,
                 ) => self.with_fst_scope_vhdl(ty, base_type, thing, |this| {
@@ -801,6 +809,7 @@ impl Context {
                     | vhpiClassKindT::vhpiSimpleSigAssignStmtK
                     | vhpiClassKindT::vhpiProcessStmtK
                     | vhpiClassKindT::vhpiRecordTypeDeclK,
+                    _,
                     _,
                     _,
                 ) => Ok(()),
@@ -1068,6 +1077,7 @@ impl Context {
                     context: cheated_context_ref,
                     fst_handle,
                     encoding,
+                    is_string: false,
                 });
 
                 let mut time_config = t_vpi_time {
@@ -1132,6 +1142,7 @@ impl Context {
         is_const: bool,
         is_basic: bool,
         is_array: bool,
+        is_string: bool,
     ) -> anyhow::Result<()> {
         let full_name = self
             .vhpi
@@ -1158,7 +1169,9 @@ impl Context {
             let is_complicated_enum =
                 matches!(base_type_kind, vhpiClassKindT::vhpiEnumTypeDeclK) && !is_basic;
 
-            let var_type = if is_complicated_enum {
+            let var_type = if is_string {
+                fstVarType::FST_VT_GEN_STRING
+            } else if is_complicated_enum {
                 fstVarType::FST_VT_SV_ENUM
             } else if is_const {
                 fstVarType::FST_VT_VCD_PARAMETER
@@ -1211,7 +1224,9 @@ impl Context {
             let fst_handle =
                 fst_file.create_var(var_type, fstVarDir::FST_VD_IMPLICIT, bits, var_name, None);
 
-            let value_format = if is_complicated_enum {
+            let value_format = if is_string {
+                vhpiFormatT::vhpiStrVal
+            } else if is_complicated_enum {
                 vhpiFormatT::vhpiEnumVal
             } else if is_basic && is_array {
                 vhpiFormatT::vhpiLogicVecVal
@@ -1223,7 +1238,12 @@ impl Context {
                 vhpiFormatT::vhpiBinStrVal
             };
 
-            let value = match self.vhpi.get_value(value_format, bits, handle) {
+            let value = match self.vhpi.get_value(
+                value_format,
+                if is_string { bits + 1 } else { bits },
+                handle,
+            ) {
+                Ok(vhpi::Value::Str(v)) => v,
                 Ok(vhpi::Value::BinStr(v)) => v,
                 Ok(vhpi::Value::LogicVecVal(v)) => vhdl_logic_vec_to_binstr(&v),
                 Ok(vhpi::Value::LogicVal(v)) => vhdl_logic_vec_to_binstr(&[v]),
@@ -1246,10 +1266,17 @@ impl Context {
                 }
             };
 
-            self.fst_file
-                .as_mut()
-                .unwrap()
-                .emit_value_change(fst_handle, value);
+            if is_string {
+                self.fst_file
+                    .as_mut()
+                    .unwrap()
+                    .emit_var_length_value_change(fst_handle, value);
+            } else {
+                self.fst_file
+                    .as_mut()
+                    .unwrap()
+                    .emit_value_change(fst_handle, value);
+            }
 
             if !is_const {
                 let cheated_context_ref = unsafe { &mut *(self as *mut Context) };
@@ -1257,6 +1284,7 @@ impl Context {
                     context: cheated_context_ref,
                     fst_handle,
                     encoding,
+                    is_string,
                 });
 
                 let mut time_config: vhpiTimeT = Default::default();

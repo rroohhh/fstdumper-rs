@@ -27,6 +27,7 @@ impl VHPIString {
 
 #[derive(Debug)]
 pub enum Value {
+    Str(CString),
     BinStr(CString),
     LogicVecVal(Vec<vhpiEnumT>),
     LogicVal(vhpiEnumT),
@@ -38,6 +39,7 @@ impl Value {
     // SAFETY: transfers ownership of buffers in value to resulting value
     unsafe fn from(value: vhpiValueS) -> Result<Self> {
         match value.format {
+            vhpiFormatT::vhpiStrVal => Ok(Value::Str(CString::from_raw(value.value.str_))),
             vhpiFormatT::vhpiBinStrVal => Ok(Value::BinStr(CString::from_raw(value.value.str_))),
             vhpiFormatT::vhpiEnumVal => Ok(Value::Enum(value.value.enumv)),
             vhpiFormatT::vhpiIntVal => Ok(Value::IntVal(value.value.intg)),
@@ -108,7 +110,7 @@ impl VHPIContext {
                 std::mem::forget(buf);
                 (vhpiValueS__bindgen_ty_1 { enumvs: ptr }, buf_size)
             }
-            vhpiFormatT::vhpiBinStrVal => (
+            vhpiFormatT::vhpiBinStrVal | vhpiFormatT::vhpiStrVal => (
                 vhpiValueS__bindgen_ty_1 {
                     str_: unsafe {
                         CString::from_vec_unchecked(vec![0; buf_size as usize]).into_raw()

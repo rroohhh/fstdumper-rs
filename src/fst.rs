@@ -54,6 +54,22 @@ impl FstFile {
         unsafe { fst_sys::fstWriterEmitValueChange(self.file, handle, value.as_ptr() as _) }
     }
 
+    // for strings
+    pub fn emit_var_length_value_change(
+        &mut self,
+        handle: fst_sys::fstHandle,
+        value: impl std::ops::Deref<Target = std::ffi::CStr>,
+    ) {
+        unsafe {
+            fst_sys::fstWriterEmitVariableLengthValueChange(
+                self.file,
+                handle,
+                value.as_ptr() as _,
+                value.to_bytes().len() as _,
+            )
+        }
+    }
+
     pub fn create_var(
         &mut self,
         ty: fst_sys::fstVarType,
